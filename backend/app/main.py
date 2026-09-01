@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.database import Base, engine
 from app.models import Batch, Job
+from app.redis_client import redis_client
 from app.routes.batches import router as batches_router
 
 
@@ -16,8 +17,15 @@ app = FastAPI(
 
 @app.get("/health")
 def health_check():
+    try:
+        redis_client.ping()
+        redis_status = "connected"
+    except Exception:
+        redis_status = "disconnected"
+
     return {
-        "status": "ok"
+        "status": "ok",
+        "redis": redis_status,
     }
 
 

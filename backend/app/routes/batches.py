@@ -7,6 +7,7 @@ from app.models.job import Job
 from app.schemas.batch import BatchCreate, BatchResponse
 from fastapi import HTTPException
 from app.schemas.job import JobResponse
+from app.services.queue_service import enqueue_job
 
 
 router = APIRouter(
@@ -30,6 +31,8 @@ def create_batch(
     db.add(batch)
     db.flush()
 
+    jobs = []
+
     for job_data in batch_data.jobs:
         job = Job(
             batch_id=batch.id,
@@ -37,12 +40,17 @@ def create_batch(
         )
 
         db.add(job)
+        jobs.append(job)
 
     db.commit()
+
+    for job in jobs:
+        db.refresh(job)
+        enqueue_job(job.id)
+
     db.refresh(batch)
 
     return batch
-
 
 @router.get(
     "/{batch_id}",
