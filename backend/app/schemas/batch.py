@@ -2,9 +2,11 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.schemas.job import JobCreate
+
 
 class BatchCreate(BaseModel):
-    total_jobs: int
+    jobs: list[JobCreate]
 
 
 class BatchResponse(BaseModel):
