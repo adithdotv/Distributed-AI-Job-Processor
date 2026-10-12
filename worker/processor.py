@@ -2,6 +2,7 @@ from app.config import settings
 from app.models.job import Job
 
 from app.services.queue_service import enqueue_job
+from app.services.llm_service import generate_result
 from worker.database import SessionLocal
 
 
@@ -78,8 +79,4 @@ def process_job(job_id: int):
 
 
 def process_job_logic(job: Job) -> str:
-    import time
-
-    time.sleep(3)
-
-    return f"Processed: {job.input_data}"
+    return generate_result(job.input_data)
