@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import threading
+from sqlalchemy import update
 
 from app.config import settings
 from app.models.job import Job
@@ -8,100 +10,226 @@ from app.services.queue_service import enqueue_job
 from worker.database import SessionLocal
 
 
-def process_job(job_id: int):
-    db = SessionLocal()
-    retry_job = False
+LEASE_SECONDS = 120
 
-    try:
-        job = db.get(Job, job_id)
 
-        if not job:
-            print(f"Job {job_id} not found")
-            return
+def renew_lease(job_id: int, worker_id: str, stop_event):
+    while not stop_event.wait(30):
+        db = SessionLocal()
 
-        if job.status in ("completed", "failed"):
-            print(
-                f"Job {job_id} already finished "
-                f"with status={job.status}"
-            )
-            return
-
-        # Start a new attempt.
-        job.attempts += 1
-        job.status = "processing"
-
-        attempt = JobAttempt(
-            job_id=job.id,
-            attempt_number=job.attempts,
-            status="processing",
-        )
-
-        db.add(attempt)
-
-        # Persist the attempt before calling Gemini.
-        db.commit()
-        db.refresh(attempt)
-
-        attempt_id = attempt.id
-
-        print(
-            f"Processing Job {job_id} "
-            f"(attempt {attempt.attempt_number})"
-        )
-
-        # Run the existing Gemini processing logic.
         try:
-            result = process_job_logic(job)
+            new_expiry = datetime.now(timezone.utc) + timedelta(
+                seconds=LEASE_SECONDS
+            )
 
-        except Exception as exc:
-            # Discard any uncommitted changes from processing.
-            db.rollback()
+            result = db.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.status == "processing",
+                    Job.worker_id == worker_id,
+                )
+                .values(lease_expires_at=new_expiry)
+            )
 
-            job = db.get(Job, job_id)
-            attempt = db.get(JobAttempt, attempt_id)
+            db.commit()
 
-            if not job or not attempt:
+            if result.rowcount != 1:
                 print(
-                    f"Could not reload Job {job_id} "
-                    "or its attempt after failure"
+                    f"Worker {worker_id} could not renew "
+                    f"the lease for Job {job_id}"
                 )
                 return
 
-            attempt.status = "failed"
-            attempt.error_message = str(exc)
-            attempt.finished_at = datetime.now(timezone.utc)
+            print(f"Lease renewed for Job {job_id}")
 
-            if job.attempts < settings.max_job_attempts:
-                job.status = "pending"
-                retry_job = True
-            else:
-                job.status = "failed"
-
-            # Save failure history before scheduling a retry.
-            db.commit()
-
+        except Exception as exc:
+            db.rollback()
             print(
-                f"Job {job_id} attempt "
-                f"{attempt.attempt_number} failed: {exc}"
+                f"Lease renewal failed for Job {job_id}: {exc}"
             )
 
-            if retry_job:
-                print(f"Job {job_id} queued for retry")
-            else:
-                print(f"Job {job_id} permanently failed")
+        finally:
+            db.close()
 
-        else:
-            # The AI processing succeeded.
-            job.result = result
-            job.status = "completed"
 
-            attempt.status = "completed"
+def run_with_lease_renewal(job: Job, job_id: int, worker_id: str):
+    stop_event = threading.Event()
+
+    heartbeat = threading.Thread(
+        target=renew_lease,
+        args=(job_id, worker_id, stop_event),
+        daemon=True,
+    )
+
+    heartbeat.start()
+
+    try:
+        return process_job_logic(job)
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=2)
+
+
+
+
+def process_job(job_id: int, worker_id: str):
+    db = SessionLocal()
+    retry_job = False
+    attempt_id = None
+
+    try:
+        lease_expiry = datetime.now(timezone.utc) + timedelta(
+            seconds=LEASE_SECONDS
+        )
+
+        claim = db.execute(
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.status == "pending",
+            )
+            .values(
+                status="processing",
+                attempts=Job.attempts + 1,
+                worker_id=worker_id,
+                lease_expires_at=lease_expiry,
+            )
+            .returning(Job.attempts)
+        )
+
+        attempt_number = claim.scalar_one_or_none()
+
+        if attempt_number is None:
+            db.rollback()
+            print(
+                f"Job {job_id} was not claimed by {worker_id}; "
+                "it may already be claimed or finished."
+            )
+            return
+
+        job = db.get(Job, job_id)
+
+        if job is None:
+            db.rollback()
+            print(f"Job {job_id} not found")
+            return
+
+        attempt = JobAttempt(
+            job_id=job_id,
+            attempt_number=attempt_number,
+            status="processing",
+        )
+        db.add(attempt)
+        db.commit()
+        db.refresh(attempt)
+        attempt_id = attempt.id
+
+        print(
+            f"Worker {worker_id} processing Job {job_id} "
+            f"(attempt {attempt_number})"
+        )
+
+        try:
+            result = run_with_lease_renewal(job, job_id, worker_id)
+
+        except Exception as exc:
+            db.rollback()
+
+            attempt = db.get(JobAttempt, attempt_id)
+            if attempt is None:
+                raise RuntimeError(
+                    f"Could not reload attempt {attempt_id}"
+                ) from exc
+
+            next_status = (
+                "pending"
+                if attempt_number < settings.max_job_attempts
+                else "failed"
+            )
+
+            # Only the worker that still owns the lease may
+            # change the job state.
+            ownership = db.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.status == "processing",
+                    Job.worker_id == worker_id,
+                )
+                .values(
+                    status=next_status,
+                    worker_id=None,
+                    lease_expires_at=None,
+                )
+                .returning(Job.id)
+            )
+
+            owns_job = ownership.scalar_one_or_none() is not None
+
+            attempt.status = "failed"
+            attempt.error_message = (
+                str(exc)
+                if owns_job
+                else "Worker lost job ownership before finalizing failure."
+            )
             attempt.finished_at = datetime.now(timezone.utc)
-            attempt.error_message = None
 
             db.commit()
 
-            print(f"Job {job_id} completed")
+            if owns_job:
+                retry_job = next_status == "pending"
+                print(
+                    f"Job {job_id} attempt {attempt_number} failed: {exc}"
+                )
+            else:
+                print(
+                    f"Worker {worker_id} lost ownership of Job {job_id}; "
+                    "it did not change the job state."
+                )
+
+        else:
+            # Finalize only if this worker still owns the job.
+            ownership = db.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.status == "processing",
+                    Job.worker_id == worker_id,
+                )
+                .values(
+                    result=result,
+                    status="completed",
+                    worker_id=None,
+                    lease_expires_at=None,
+                )
+                .returning(Job.id)
+            )
+
+            owns_job = ownership.scalar_one_or_none() is not None
+
+            attempt = db.get(JobAttempt, attempt_id)
+            if attempt is None:
+                raise RuntimeError(
+                    f"Could not reload attempt {attempt_id}"
+                )
+
+            if owns_job:
+                attempt.status = "completed"
+                attempt.error_message = None
+                print(f"Job {job_id} completed by {worker_id}")
+            else:
+                attempt.status = "failed"
+                attempt.error_message = (
+                    "Worker lost job ownership before finalizing success."
+                )
+                print(
+                    f"Worker {worker_id} lost ownership of Job {job_id}; "
+                    "its result was discarded."
+                )
+
+            attempt.finished_at = datetime.now(timezone.utc)
+            db.commit()
 
     except Exception:
         db.rollback()
@@ -110,9 +238,9 @@ def process_job(job_id: int):
     finally:
         db.close()
 
-    # Queue only after the database transaction has committed.
     if retry_job:
         enqueue_job(job_id)
+        print(f"Job {job_id} queued for retry")
 
 
 def process_job_logic(job: Job) -> str:
