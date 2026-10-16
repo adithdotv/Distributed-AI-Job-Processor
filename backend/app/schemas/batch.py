@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -15,6 +16,8 @@ class BatchResponse(BaseModel):
     total_jobs: int
     completed_jobs: int
     failed_jobs: int
+    pending_jobs: int
+    processing_jobs: int
     created_at: datetime
 
     class Config:

@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+from collections import Counter
+from sqlalchemy import func
 
 from app.database import get_db
 from app.models.batch import Batch
@@ -14,6 +16,49 @@ router = APIRouter(
     prefix="/batches",
     tags=["Batches"],
 )
+
+
+def build_batch_summary(batch: Batch, db: Session) -> dict:
+    rows = (
+        db.query(Job.status, func.count(Job.id))
+        .filter(Job.batch_id == batch.id)
+        .group_by(Job.status)
+        .all()
+    )
+
+    counts = Counter({
+        status: count
+        for status, count in rows
+    })
+
+    total = sum(counts.values())
+    completed = counts["completed"]
+    failed = counts["failed"]
+    pending = counts["pending"]
+    processing = counts["processing"]
+
+    if completed + failed == total:
+        if failed == 0:
+            status = "completed"
+        elif completed == 0:
+            status = "failed"
+        else:
+            status = "completed_with_failures"
+    elif processing > 0 or completed > 0 or failed > 0:
+        status = "processing"
+    else:
+        status = "pending"
+
+    return {
+        "id": batch.id,
+        "status": status,
+        "total_jobs": total,
+        "completed_jobs": completed,
+        "failed_jobs": failed,
+        "pending_jobs": pending,
+        "processing_jobs": processing,
+        "created_at": batch.created_at,
+    }
 
 
 @router.post(
@@ -50,7 +95,7 @@ def create_batch(
 
     db.refresh(batch)
 
-    return batch
+    return build_batch_summary(batch, db)
 
 @router.get(
     "/{batch_id}",
@@ -68,7 +113,7 @@ def get_batch(
             detail="Batch not found",
         )
 
-    return batch
+    return build_batch_summary(batch, db)
 
 
 @router.get(
