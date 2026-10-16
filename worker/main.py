@@ -7,6 +7,7 @@ import redis
 from app.config import settings
 from worker.processor import process_job
 from worker.recovery import recover_expired_jobs
+from app.services.queue_service import promote_due_retries
 
 
 QUEUE_NAME = "jobs"
@@ -26,6 +27,7 @@ def start_worker():
     print(f"Listening on queue: {QUEUE_NAME}")
 
     while True:
+        promote_due_retries()
         recover_expired_jobs(redis_client)
 
         payload = redis_client.blmove(

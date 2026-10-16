@@ -5,7 +5,7 @@ from sqlalchemy import update
 from app.config import settings
 from app.models.job import Job
 from app.models.job_attempt import JobAttempt
-from app.services.queue_service import enqueue_job
+from app.services.queue_service import schedule_retry
 
 from worker.database import SessionLocal
 
@@ -239,8 +239,17 @@ def process_job(job_id: int, worker_id: str):
         db.close()
 
     if retry_job:
-        enqueue_job(job_id)
-        print(f"Job {job_id} queued for retry")
+        delay_seconds = min(
+            5 * (2 ** (attempt_number - 1)),
+            30,
+        )
+
+        schedule_retry(job_id, delay_seconds)
+
+        print(
+            f"Job {job_id} scheduled for retry "
+            f"in {delay_seconds} seconds"
+        )
 
 
 def process_job_logic(job: Job) -> str:
