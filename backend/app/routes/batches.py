@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from collections import Counter
 from sqlalchemy import func
@@ -59,6 +59,24 @@ def build_batch_summary(batch: Batch, db: Session) -> dict:
         "processing_jobs": processing,
         "created_at": batch.created_at,
     }
+
+
+@router.get(
+    "",
+    response_model=list[BatchResponse],
+)
+def list_batches(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    batches = (
+        db.query(Batch)
+        .order_by(Batch.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [build_batch_summary(batch, db) for batch in batches]
 
 
 @router.post(

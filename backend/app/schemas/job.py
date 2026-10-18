@@ -16,6 +16,7 @@ class JobResponse(BaseModel):
     result: Optional[str]
     attempts: int
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True

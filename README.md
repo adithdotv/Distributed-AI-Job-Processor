@@ -84,7 +84,7 @@ flowchart LR
 ### 1. Clone
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/adithdotv/Distributed-AI-Job-Processor
 cd "Distributed AI Job Processor"
 ```
 
@@ -156,6 +156,7 @@ Read by the Python application (`backend/app/config.py`):
 | `GEMINI_API_KEY` | yes | none | Gemini API key |
 | `GEMINI_MODEL` | no | `gemini-3.5-flash-lite` | Gemini model name |
 | `MAX_JOB_ATTEMPTS` | no | `3` | Attempts before a job is marked `failed` |
+| `CORS_ORIGINS` | no | `http://localhost:5173,http://localhost:8080` | Comma-separated browser origins allowed to call the API |
 
 Read by Docker Compose only:
 
@@ -182,9 +183,11 @@ Base URL: `http://localhost:8000`. There is no authentication.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Service and Redis connectivity |
+| `GET` | `/batches?limit=50` | Most recent batches with progress counts (max 200) |
 | `POST` | `/batches` | Create a batch of jobs and queue them |
 | `GET` | `/batches/{batch_id}` | Batch status and progress counts |
 | `GET` | `/batches/{batch_id}/jobs` | All jobs in the batch, with results |
+| `GET` | `/jobs?status=&batch_id=&limit=100` | Most recent jobs, optionally filtered (max 500) |
 
 ### Create a batch
 
@@ -234,7 +237,8 @@ curl http://localhost:8000/batches/1/jobs
     "input_data": "Summarize: Redis is an in-memory data store.",
     "result": "...generated text...",
     "attempts": 1,
-    "created_at": "2026-01-01T12:00:00Z"
+    "created_at": "2026-01-01T12:00:00Z",
+    "updated_at": "2026-01-01T12:00:05Z"
   }
 ]
 ```
@@ -252,6 +256,28 @@ curl http://localhost:8000/health
 ```
 
 `redis` is `"disconnected"` if Redis cannot be pinged. The endpoint does not check PostgreSQL.
+
+## Web dashboard
+
+A React + Vite dashboard lives in [`frontend/`](frontend/). With Docker it is served at <http://localhost:8080>.
+
+- **Overview:** job totals by status and recent batches, derived from the batch summaries.
+- **Jobs:** searchable, filterable job list with a detail panel (input, result, attempts, timestamps).
+- **Batches:** submit a batch, watch progress bars update, and open a batch to see its jobs.
+- **Settings:** API connectivity check and base-URL override (stored in the browser).
+
+The browser calls the API directly, so `VITE_API_BASE_URL` must be a URL the browser can reach (default `http://localhost:8000`), never the Docker-internal hostname `api`. It is baked in at build time (a build arg in `docker-compose.yml`).
+
+Local development:
+
+```bash
+cd frontend
+cp .env.example .env     # optional; the default is http://localhost:8000
+npm install
+npm run dev              # http://localhost:5173
+```
+
+The dashboard polls the API every few seconds while the tab is visible. Error messages from failed attempts are not shown because the API does not expose them yet.
 
 ## Job lifecycle
 
@@ -378,7 +404,7 @@ PYTHONPATH=backend python -m worker.main
 - **At-least-once processing.** Duplicate deliveries are possible. The status-guarded claim prevents concurrent double processing, but a job can be retried or re-run after a crash. This is not exactly-once.
 - **Enqueue after commit.** If the API crashes between committing jobs and pushing them to Redis, those jobs stay `pending` and nothing re-queues them.
 - **No automated tests.**
-- **No authentication, rate limiting or CORS configuration.**
+- **No authentication or rate limiting.**
 - **No migrations.** Tables come from `create_all`.
 - **Redis has no persistent volume.** Unprocessed queue messages are lost if the Redis container is recreated.
 - **No explicit timeout on Gemini calls** in the code. A hung call keeps its worker busy, and the lease keeps being renewed meanwhile.

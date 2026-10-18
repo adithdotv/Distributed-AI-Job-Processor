@@ -69,5 +69,17 @@ services:
     restart: unless-stopped
 
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+
 volumes:
   postgres_data:
